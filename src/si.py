@@ -5,7 +5,11 @@ from util.util import make_grid, reshape_for_batchwise, plot_loss_curve, plot_sa
 
 import time
 
-class StochasticInterpolant:
+class SI:
+    '''
+    Stochastic Interpolant base class.
+    '''
+
     def __init__(self, model, device='cpu', dtype=torch.double):
         self.model = model
         self.device = device
@@ -17,7 +21,7 @@ class StochasticInterpolant:
         '''
         z = torch.randn_like(x_0)
         x_t = self.I(t, x_0, x_1) + self.gamma(t)*z
-        return x_t
+        return x_t, z
             
     def I(self, t, x_0, x_1):
         '''
@@ -43,22 +47,31 @@ class StochasticInterpolant:
         '''
         AssertionError('Not implemented')
 
-    def b(self, t, x_0, x_1, x_t):
+    def b(self, t, x_0, x_1, z):
         '''
         Velocity term, i.e. b(t, x_t) = v(t, x_0, x_1) + dgamma(t)*gamma(t)*s(t)
         '''
-        z = torch.randn_like(x_0)
         return self.v(t, x_0, x_1) + self.dgamma(t)*z
 
-    def s(self, t, x_0, x_1, x_t):
+    def s(self, t, z):
         '''
         Score term, i.e. s(t,x_t) = - E[z|x_t = x] / gamma(t)
         '''
-        # TODO: fix when gamma(t) = 0
-        z = torch.randn_like(x_0)
+        # TODO: find best fix when gamma(t) = 0, see section 6.1 of Albergo et al. 2023
         return -z/(self.gamma(t) + 1e-8)
+    
+    def compute_loss(self, loss_type, model_out, t, x_0, x_1, x_t, z):
+        if loss_type == 'score':
+            target = self.s(t, z)
+        elif loss_type == 'velocity':
+            target = self.b(t, x_0, x_1, z)
+        elif loss_type == 'cvf':
+            target = self.v(t, x_0, x_1)
+        elif loss_type == 'noise':
+            target = z
+        return ((model_out - target)**2).mean()
 
-    def train(self, train_loader, optimizer, epochs, 
+    def train(self, train_loader, optimizer, epochs, loss_type='cvf',
                 scheduler=None, test_loader=None, eval_int=0, 
                 save_int=0, generate=False, save_path=None):
 
@@ -66,6 +79,8 @@ class StochasticInterpolant:
         te_losses = []
         eval_eps = []
         evaluate = (eval_int > 0) and (test_loader is not None)
+
+        self.loss_type = loss_type
 
         model = self.model
         device = self.device
@@ -97,9 +112,9 @@ class StochasticInterpolant:
                 # t ~ Unif[0, 1)
                 t = torch.rand(batch_size, device=device)
                 # Simulate x_t
-                x_t = self.simulate(t, x_0, x_1)
+                x_t, z = self.simulate(t, x_0, x_1)
                 # Get conditional vector fields
-                target = self.v(t, x_0, x_1, x_t)
+                # target = self.v(t, x_0, x_1, x_t)
 
                 # x_t = x_t.to(device) # check if this is necessary
                 # target = target.to(device) # check if this is necessary         
@@ -109,7 +124,8 @@ class StochasticInterpolant:
 
                 # Evaluate loss and do gradient step
                 optimizer.zero_grad()
-                loss = ((model_out - target)**2).mean() 
+                # loss = ((model_out - target)**2).mean() 
+                loss = self.compute_loss(loss_type, model_out, t, x_0, x_1, x_t, z)
                 loss.backward()
                 optimizer.step()
 
@@ -190,20 +206,57 @@ class StochasticInterpolant:
         '''
         AssertionError('Not implemented')
 
-    def sample_b(self, n_samples):
+    def sample_r(self, n_samples):
         '''
         Sample from the stochastic interpolant, starting from x_1.
         '''
         AssertionError('Not implemented')
 
+    def v_to_b_model(self, model):
+        '''
+        Given a model of the conditional vector field v(t,x), return a model of the velocity field b(t,x_t).
+        '''
+        AssertionError('Not implemented')
+
+    def s_to_b_model(self, model):
+        '''
+        Given a model of the score term s(t,x_t), return a model of the velocity field b(t,x_t).
+        '''
+        AssertionError('Not implemented')
+
+    def z_to_b_model(self, model):
+        '''
+        Given a model of the noise term z, return a model of the velocity field b(t,x_t).
+        '''
+        AssertionError('Not implemented')
+
+    def get_b_model(self, direction):
+        '''
+        Return the model of the velocity field b(t, x_t), depending on the direction of the ODE and on the loss type.
+        '''
+        if self.loss_type == 'velocity':
+            model = self.model
+        elif self.loss_type == 'cvf':
+            model = self.v_to_b_model(self.model)
+        elif self.loss_type == 'score':
+            model = self.s_to_b_model(self.model)
+        elif self.loss_type == 'noise':
+            model = self.z_to_b_model(self.model)
+
+        if direction == 'f':
+            return model
+        elif direction == 'r':
+            return lambda x, t: -model(x, 1-t) # TODO: not sure if this is correct. might be -model(x, t)
+        
+        
     @torch.no_grad()
     def sample(self, x_initial, direction='f', n_samples=1, n_eval=2, return_path=False, rtol=1e-5, atol=1e-5):
         '''
-        Sample from the stochastic interpolant, starting from x_initial.
+        Sample from the stochastic interpolant using an ODE, starting from x_initial.
 
         Arguments:
         - x_initial: [batch_size, n_channels, *dims]
-        - direction: 'f' or 'b', forward or backward in time
+        - direction: 'f' or 'r', forward or reverse in time
         - n_samples: number of samples to generate
         - n_eval: number of timesteps to evaluate
         - return_path: if True, return the entire path of samples, otherwise just the final sample
@@ -217,6 +270,7 @@ class StochasticInterpolant:
             # if x_initial has less samples than n_samples, repeat x_initial at random along batch dimension to get n_samples
             x_initial = x_initial.repeat((n_samples // inital_batch_size) + 1, 1, 1, 1)[:n_samples]
 
+        b_model = self.get_b_model(self, direction)
         method = 'dopri5'
         out = odeint(self.model, x_initial, t, method=method, rtol=rtol, atol=atol)
 
@@ -225,7 +279,11 @@ class StochasticInterpolant:
         else:
             return out[-1]
 
-class LinearInterpolant(StochasticInterpolant):
+class SLI(SI):
+    '''
+    Spatially Linear Interpolant base class, i.e. x(t) = a(t)*x_0 + b(t)*x_1
+    '''
+
     def __init__(self, model, device='cpu', dtype=torch.double):
         super().__init__(model, device=device, dtype=dtype)
 
@@ -242,29 +300,94 @@ class LinearInterpolant(StochasticInterpolant):
         return self.a(t)*x_0 + self.b(t)*x_1
     def dI(self, t, x_0, x_1):
         return self.da(t)*x_0 + self.db(t)*x_1
-
-
-
-    def I(self, t, x_0, x_1):
-        return (1 - t)*x_0 + t*x_1
-    def dI(self, t, x_0, x_1):
-        return x_1 - x_0
     def gamma(self, t):
         return torch.zeros_like(t)
     def dgamma(self, t):
         return torch.zeros_like(t)
 
-class NoisyLinearInterpolant(StochasticInterpolant):
+class LinearInterpolant(SLI):
+    '''
+    Linear Interpolant, i.e. x(t) = (1-t)*x_0 + t*x_1
+    '''
     def __init__(self, model, device='cpu', dtype=torch.double):
         super().__init__(model, device=device, dtype=dtype)
+    def a(self, t):
+        return 1 - t
+    def b(self, t):
+        return t
+    def da(self, t):
+        return -torch.ones_like(t)
+    def db(self, t):
+        return torch.ones_like(t)
+    
+class TrigLinearInterpolant(SLI):
+    '''
+    Trigonometric Linear Interpolant, i.e. x(t) = sin(pi*t/2)*x_0 + cos(pi*t/2)*x_1
+    '''
+    def __init__(self, model, device='cpu', dtype=torch.double):
+        super().__init__(model, device=device, dtype=dtype)
+    def a(self, t):
+        return torch.sin(np.pi*t/2)
+    def b(self, t):
+        return torch.cos(np.pi*t/2)
+    def da(self, t):
+        return np.pi/2 * torch.cos(np.pi*t/2)
+    def db(self, t):
+        return -np.pi/2 * torch.sin(np.pi*t/2)
+   
+class PolynomialInterpolant(SLI):
+    '''
+    Polynomial Interpolant of order p, i.e. x(t) = (1-t)^p*x_0 + t^p*x_1
+    '''
+    def __init__(self, p, model, device='cpu', dtype=torch.double):
+        super().__init__(model, device, dtype)
+        self.p = p
 
-    def I(self, t, x_0, x_1):
-        return (1 - t)*x_0 + t*x_1
-    def dI(self, t, x_0, x_1):
-        return x_1 - x_0
-    def gamma(self, t):
-        return np.sqrt(2*t(1-t))
-    def dgamma(self, t):
-        return (1 - 2*t)/np.sqrt(2*t(1-t))
+    def a(self, t):
+        return (1-t)**self.p
+    def b(self, t):
+        return t**self.p
+    def da(self, t):
+        return -self.p*(1-t)**(self.p-1)
+    def db(self, t):
+        return self.p*t**(self.p-1)
+    
+class DiffusionInterpolant(SLI):
+    '''
+    Variance-preserving diffusion interpolant, i.e. x(t) = sqrt(1-t^2)*x_0 + t*x_1
+    '''
+    def __init__(self, model, device='cpu', dtype=torch.double):
+        super().__init__(model, device, dtype)
+    def a(self, t):
+        return np.sqrt(1-t**2)
+    def b(self, t):
+        return t
+    def da(self, t):
+        return -t/np.sqrt(1-t**2)
+    def db(self, t):
+        return np.ones_like(t)
 
-class 
+class MirrorInterpolant(SLI):
+    '''
+    Mirror interpolant, i.e. x(t) = x_0 (recommended to add noise :-) )
+    '''
+    def __init__(self, model, device='cpu', dtype=torch.double):
+        super().__init__(model, device, dtype)
+        make_noisy(self)
+
+    def a(self, t):
+        return torch.ones_like(t)
+    def b(self, t):
+        return torch.zeros_like(t)
+    def da(self, t):
+        return torch.zeros_like(t)
+    def db(self, t):
+        return torch.zeros_like(t)
+
+def make_noisy(SI):
+    '''
+    Add the gamma(t) component to an interpolant
+    '''
+    SI.gamma = lambda t: np.sqrt(2*t(1-t))
+    SI.dgamma = lambda t: (1 - 2*t)/np.sqrt(2*t(1-t))
+    return SI
