@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 from torchdiffeq import odeint
-from util.util import make_grid, reshape_for_batchwise, plot_loss_curve, plot_samples
+from util.util import plot_loss_curve, plot_samples
 
 import time
 
@@ -60,7 +60,7 @@ class SI:
         # TODO: find best fix when gamma(t) = 0, see section 6.1 of Albergo et al. 2023
         return -z/(self.gamma(t) + 1e-8)
     
-    def compute_loss(self, loss_type, model_out, t, x_0, x_1, x_t, z):
+    def compute_loss(self, loss_type, model_out, t, x_0, x_1, z):
         if loss_type == 'score':
             target = self.s(t, z)
         elif loss_type == 'velocity':
@@ -81,6 +81,7 @@ class SI:
         evaluate = (eval_int > 0) and (test_loader is not None)
 
         self.loss_type = loss_type
+        self.one_sided = False
 
         model = self.model
         device = self.device
@@ -94,13 +95,18 @@ class SI:
             tr_loss = 0.0
 
             for batch in train_loader:
-                try:
-                    x_0, x_1 = batch
-                    x_0, x_1 = x_0.to(device), x_1.to(device)
-                except ValueError:
-                    # When train_loader contains only one dataset, resort to one-sided interpolants (i.e. rho_1 is Gaussian)
-                    x_0 = batch
-                    x_1 = torch.randn_like(x_0)
+                if first or not self.one_sided:
+                    try:
+                        x_0, x_1 = batch
+                        x_0, x_1 = x_0.to(device), x_1.to(device)
+                    except ValueError:
+                        # When train_loader contains only one dataset, resort to one-sided interpolants (i.e. rho_1 is Gaussian)
+                        x_0 = batch.to(device)
+                        x_1 = torch.randn_like(x_0).to(device)
+                        self.one_sided = True
+                else:
+                    x_0 = batch.to(device)
+                    x_1 = torch.randn_like(x_0).to(device)
                 
                 batch_size = x_0.shape[0]
 
@@ -113,19 +119,12 @@ class SI:
                 t = torch.rand(batch_size, device=device)
                 # Simulate x_t
                 x_t, z = self.simulate(t, x_0, x_1)
-                # Get conditional vector fields
-                # target = self.v(t, x_0, x_1, x_t)
-
-                # x_t = x_t.to(device) # check if this is necessary
-                # target = target.to(device) # check if this is necessary         
-
                 # Get model output
                 model_out = model(x_t, t)
 
                 # Evaluate loss and do gradient step
                 optimizer.zero_grad()
-                # loss = ((model_out - target)**2).mean() 
-                loss = self.compute_loss(loss_type, model_out, t, x_0, x_1, x_t, z)
+                loss = self.compute_loss(loss_type, model_out, t, x_0, x_1, z)
                 loss.backward()
                 optimizer.step()
 
@@ -151,12 +150,12 @@ class SI:
                     if evaluate:
                         te_loss = 0.0
                         for batch in test_loader:
-                            try:
+                            if not self.one_sided:
                                 x_0, x_1 = batch
                                 x_0, x_1 = x_0.to(device), x_1.to(device)
-                            except ValueError:
-                                x_0 = batch
-                                x_1 = None
+                            else:
+                                x_0 = batch.to(device)
+                                x_1 = torch.randn_like(x_0).to(device)
 
                             batch_size = x_0.shape[0]
 
@@ -164,17 +163,11 @@ class SI:
                             t = torch.rand(batch_size, device=device)
                             # Simulate x_t
                             x_t = self.simulate(t, x_0, x_1)
-                            # Get conditional vector fields
-                            target = self.b(t, x_0, x_1, x_t)
-
-                            # x_t = x_t.to(device) # check if this is necessary
-                            # target = target.to(device) # check if this is necessary
-
                             # Get model output
                             model_out = model(x_t, t)
 
                             # Evaluate loss
-                            loss = ((model_out - target)**2).mean()
+                            loss = self.compute_loss(loss_type, model_out, t, x_0, x_1, z)
                             te_loss += loss.item()
                             
                         te_loss /= len(test_loader)
@@ -224,7 +217,7 @@ class SI:
         '''
         AssertionError('Not implemented')
 
-    def z_to_b_model(self, model):
+    def eta_to_b_model(self, model):
         '''
         Given a model of the noise term z, return a model of the velocity field b(t,x_t).
         '''
@@ -241,7 +234,7 @@ class SI:
         elif self.loss_type == 'score':
             model = self.s_to_b_model(self.model)
         elif self.loss_type == 'noise':
-            model = self.z_to_b_model(self.model)
+            model = self.eta_to_b_model(self.model)
 
         if direction == 'f':
             return model
@@ -267,12 +260,13 @@ class SI:
         inital_batch_size = x_initial.shape[0]
 
         if n_samples > inital_batch_size:
-            # if x_initial has less samples than n_samples, repeat x_initial at random along batch dimension to get n_samples
-            x_initial = x_initial.repeat((n_samples // inital_batch_size) + 1, 1, 1, 1)[:n_samples]
+            # if x_initial has less samples than n_samples, repeat x_initial at random to get n_samples
+            n_new_samples = n_samples - inital_batch_size
+            x_initial = torch.cat([x_initial, x_initial[torch.randperm(inital_batch_size)[:n_new_samples]]], dim=0)
 
         b_model = self.get_b_model(self, direction)
         method = 'dopri5'
-        out = odeint(self.model, x_initial, t, method=method, rtol=rtol, atol=atol)
+        out = odeint(b_model, x_initial, t, method=method, rtol=rtol, atol=atol)
 
         if return_path:
             return out
@@ -304,10 +298,20 @@ class SLI(SI):
         return torch.zeros_like(t)
     def dgamma(self, t):
         return torch.zeros_like(t)
+    
+    def eta_to_b_model(self, model):
+        '''
+        Given a model of the noise term z, return a model of the velocity field b(t,x_t). Use only for one-sided interpolants.
+        See 6.2 of Albergo et al. 2023, "A denoiser is all you need for spatially-linear one-sided interpolants"
+        '''
+        model = lambda x, t: self.da(t)*model(x, t) + self.db(t)/self.b(t)*(x - self.a(t)* self.model(x,t))
+        return model
 
 class LinearInterpolant(SLI):
     '''
     Linear Interpolant, i.e. x(t) = (1-t)*x_0 + t*x_1
+    References: Liu et al. 2023, Flow straight and fast: Learning to generate and transfer data with rectified flow
+                Lipman et al. 2023, Flow matching for generative modeling
     '''
     def __init__(self, model, device='cpu', dtype=torch.double):
         super().__init__(model, device=device, dtype=dtype)
@@ -367,6 +371,30 @@ class DiffusionInterpolant(SLI):
     def db(self, t):
         return np.ones_like(t)
 
+class EncoderDecoderInterpolant(SLI):
+    '''
+    Encoder-decoder interpolant, i.e. x(t) = cos^2(pi*t)*1_{[0,.5)}(t)*x_0 + cos^2(pi*t)*1_{[.5,1]}(t)*x_1
+    '''
+    def __init__(self, model, device='cpu', dtype=torch.double):
+        super().__init__(model, device, dtype)
+    def a(self, t):
+        a = torch.zeros_like(t)
+        a[t < .5] = torch.cos(np.pi*t[t < .5])**2
+        return a
+    def b(self, t):
+        b = torch.zeros_like(t)
+        b[t >= .5] = torch.cos(np.pi*t[t >= .5])**2
+        return b
+    def da(self, t):
+        da = torch.zeros_like(t)
+        da[t < .5] = -2*np.pi*torch.cos(np.pi*t[t < .5])*torch.sin(np.pi*t[t < .5])
+        return da
+    def db(self, t):
+        db = torch.zeros_like(t)
+        db[t >= .5] = -2*np.pi*torch.cos(np.pi*t[t >= .5])*torch.sin(np.pi*t[t >= .5])
+        return db
+        
+
 class MirrorInterpolant(SLI):
     '''
     Mirror interpolant, i.e. x(t) = x_0 (recommended to add noise :-) )
@@ -386,8 +414,17 @@ class MirrorInterpolant(SLI):
 
 def make_noisy(SI):
     '''
-    Add the gamma(t) component to an interpolant
+    Add the gamma(t)=np.sqrt(2*t(1-t)) component to an interpolant
     '''
     SI.gamma = lambda t: np.sqrt(2*t(1-t))
     SI.dgamma = lambda t: (1 - 2*t)/np.sqrt(2*t(1-t))
     return SI
+
+def make_sinsq_noisy(SI):
+    '''
+    Add the gamma(t)=np.sin(np.pi*t)**2 component to an interpolant
+    '''
+    SI.gamma = lambda t: np.sin(np.pi*t)**2
+    SI.dgamma = lambda t: 2*np.pi*np.sin(np.pi*t)*np.cos(np.pi*t)
+    return SI
+    
