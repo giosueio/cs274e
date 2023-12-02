@@ -65,6 +65,7 @@ class SI:
         return -z/(self.gamma(t) + 1e-8)
     
     def compute_loss(self, loss_type, model_out, t, x_0, x_1, z):
+    def compute_loss(self, loss_type, model_out, t, x_0, x_1, z):
         if loss_type == 'score':
             target = self.s(t, z)
         elif loss_type == 'velocity':
@@ -85,6 +86,7 @@ class SI:
         evaluate = (eval_int > 0) and (test_loader is not None)
 
         self.loss_type = loss_type
+        self.one_sided = False
         self.one_sided = False
 
         model = self.model
@@ -129,6 +131,7 @@ class SI:
                 # Evaluate loss and do gradient step
                 optimizer.zero_grad()
                 loss = self.compute_loss(loss_type, model_out, t, x_0, x_1, z)
+                loss = self.compute_loss(loss_type, model_out, t, x_0, x_1, z)
                 loss.backward()
                 optimizer.step()
 
@@ -155,8 +158,12 @@ class SI:
                         te_loss = 0.0
                         for batch in test_loader:
                             if not self.one_sided:
+                            if not self.one_sided:
                                 x_0, x_1 = batch
                                 x_0, x_1 = x_0.to(device), x_1.to(device)
+                            else:
+                                x_0 = batch.to(device)
+                                x_1 = torch.randn_like(x_0).to(device)
                             else:
                                 x_0 = batch.to(device)
                                 x_1 = torch.randn_like(x_0).to(device)
@@ -171,6 +178,7 @@ class SI:
                             model_out = model(t, x_t)
 
                             # Evaluate loss
+                            loss = self.compute_loss(loss_type, model_out, t, x_0, x_1, z)
                             loss = self.compute_loss(loss_type, model_out, t, x_0, x_1, z)
                             te_loss += loss.item()
                             
@@ -222,6 +230,7 @@ class SI:
         AssertionError('Not implemented')
 
     def eta_to_b_model(self, model):
+    def eta_to_b_model(self, model):
         '''
         Given a model of the noise term z, return a model of the velocity field b(t,x_t).
         '''
@@ -238,6 +247,7 @@ class SI:
         elif self.loss_type == 'score':
             model = self.s_to_b_model(self.model)
         elif self.loss_type == 'noise':
+            model = self.eta_to_b_model(self.model)
             model = self.eta_to_b_model(self.model)
 
         if direction == 'f':
@@ -267,9 +277,13 @@ class SI:
             # if x_initial has less samples than n_samples, repeat x_initial at random to get n_samples
             n_new_samples = n_samples - inital_batch_size
             x_initial = torch.cat([x_initial, x_initial[torch.randperm(inital_batch_size)[:n_new_samples]]], dim=0)
+            # if x_initial has less samples than n_samples, repeat x_initial at random to get n_samples
+            n_new_samples = n_samples - inital_batch_size
+            x_initial = torch.cat([x_initial, x_initial[torch.randperm(inital_batch_size)[:n_new_samples]]], dim=0)
 
         b_model = self.get_b_model(self, direction)
         method = 'dopri5'
+        out = odeint(b_model, x_initial, t, method=method, rtol=rtol, atol=atol)
         out = odeint(b_model, x_initial, t, method=method, rtol=rtol, atol=atol)
 
         if return_path:
@@ -421,6 +435,7 @@ class MirrorInterpolant(SLI):
 
 def make_noisy(SI):
     '''
+    Add the gamma(t)=np.sqrt(2*t(1-t)) component to an interpolant
     Add the gamma(t)=np.sqrt(2*t(1-t)) component to an interpolant
     '''
     SI.gamma = lambda t: np.sqrt(2*t(1-t))
