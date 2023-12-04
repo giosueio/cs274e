@@ -3,6 +3,24 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torchvision import datasets, transforms
+from torch.utils.data import Dataset
+
+class CombinedDataset(Dataset):
+    '''
+    Combines two datasets of the same length into one. Used for building interpolant from one dataset to another.
+    '''
+
+    def __init__(self, dataset1, dataset2):
+        self.dataset1 = dataset1
+        self.dataset2 = dataset2
+
+        assert len(dataset1) == len(dataset2), "Datasets must have the same length."
+
+    def __len__(self):
+        return len(self.dataset1)
+
+    def __getitem__(self, index):
+        return [self.dataset1[index], self.dataset2[index]]
 
 def plot_loss_curve(tr_loss, save_path, te_loss=None, te_epochs=None, logscale=True):
     fig, ax = plt.subplots()
@@ -70,6 +88,78 @@ def get_unlabeled_mnist_data():
         shuffle=True
     )
     return train_loader, test_loader
+
+def get_svhn_data():
+    preprocess = transforms.ToTensor()
+    train_loader = torch.utils.data.DataLoader(
+        datasets.SVHN('data', split='extra', download=True, transform=preprocess),
+        batch_size=100,
+        shuffle=True)
+
+    return train_loader, (None, None), (None, None)
+
+def get_transformed_svhn_data():
+    preprocess = transforms.Compose([
+                transforms.Resize((28, 28)),
+                transforms.Grayscale(num_output_channels=1),
+                transforms.ToTensor(),
+                transforms.Normalize([0.], [1.])
+            ])
+
+    train_loader = torch.utils.data.DataLoader(
+        datasets.SVHN('data', split='extra', download=True, transform=preprocess),
+        batch_size=100,
+        shuffle=True)
+
+    return train_loader
+
+def get_mnist_and_svhn_data(batch_size=100):
+    preprocess = transforms.Compose([
+                transforms.Resize((28, 28)),
+                transforms.Grayscale(num_output_channels=1),
+                transforms.ToTensor(),
+                transforms.Normalize([0.], [1.])
+            ])
+        
+    d1 = datasets.MNIST('data', train=True, download=True, transform=preprocess)
+    d2 = datasets.SVHN('data', split='extra', download=True, transform=preprocess)
+
+    d2_reduced = torch.utils.data.Subset(d2, np.random.choice(len(d2), len(d1), replace=False))
+
+    dataset = torch.utils.data.ConcatDataset([d1, d2_reduced])
+    train_loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True)
+    
+    return train_loader
+
+def get_doubleloader_mnist_and_svhn_data(batch_size=100):
+    preprocess = transforms.Compose([
+                transforms.Resize((28, 28)),
+                transforms.Grayscale(num_output_channels=1),
+                transforms.ToTensor(),
+                transforms.Normalize([0.], [1.])
+            ])
+        
+    d1 = datasets.MNIST('data', train=True, download=True, transform=preprocess)
+    d2 = datasets.SVHN('data', split='extra', download=True, transform=preprocess)
+
+    d2_reduced = torch.utils.data.Subset(d2, np.random.choice(len(d2), len(d1), replace=False))
+
+    d1_nolabels = [data[0] for data in d1]
+    d2_nolabels = [data[0] for data in d2_reduced]
+
+    dataset = CombinedDataset(d1_nolabels, d2_nolabels)
+    train_loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True)
+    
+    return train_loader
+
+
+
 
 def get_mnist_data(device, use_test_subset=True):
     preprocess = transforms.ToTensor()

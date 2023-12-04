@@ -65,7 +65,6 @@ class SI:
         return -z/(self.gamma(t) + 1e-8)
     
     def compute_loss(self, loss_type, model_out, t, x_0, x_1, z):
-    def compute_loss(self, loss_type, model_out, t, x_0, x_1, z):
         if loss_type == 'score':
             target = self.s(t, z)
         elif loss_type == 'velocity':
@@ -78,7 +77,7 @@ class SI:
 
     def train(self, train_loader, optimizer, epochs, loss_type='cvf',
                 scheduler=None, test_loader=None, eval_int=0, 
-                save_int=0, generate=False, save_path=None):
+                save_int=0, save_path=None):
 
         tr_losses = []
         te_losses = []
@@ -158,12 +157,8 @@ class SI:
                         te_loss = 0.0
                         for batch in test_loader:
                             if not self.one_sided:
-                            if not self.one_sided:
                                 x_0, x_1 = batch
                                 x_0, x_1 = x_0.to(device), x_1.to(device)
-                            else:
-                                x_0 = batch.to(device)
-                                x_1 = torch.randn_like(x_0).to(device)
                             else:
                                 x_0 = batch.to(device)
                                 x_1 = torch.randn_like(x_0).to(device)
@@ -188,13 +183,6 @@ class SI:
                         t1 = time.time()
                         epoch_time = t1 - t0
                         print(f'te @ epoch {ep}/{epochs} | Loss {te_loss:.6f} | {epoch_time:.2f} (s)')
-
-
-                    # genereate samples during training?
-                    if generate:
-                        samples = self.sample(self.train_dims, n_channels=self.n_channels, n_samples=16)
-                        plot_samples(samples, save_path / f'samples_epoch{ep}.pdf')
-
 
             ##### BOOKKEEPING
             if ep % save_int == 0:
@@ -229,7 +217,6 @@ class SI:
         '''
         AssertionError('Not implemented')
 
-    def eta_to_b_model(self, model):
     def eta_to_b_model(self, model):
         '''
         Given a model of the noise term z, return a model of the velocity field b(t,x_t).
@@ -433,13 +420,14 @@ class MirrorInterpolant(SLI):
     def dbeta(self, t):
         return torch.zeros_like(t)
 
-def make_noisy(SI):
+def make_noisy(SI, noise_coeff):
     '''
-    Add the gamma(t)=np.sqrt(2*t(1-t)) component to an interpolant
-    Add the gamma(t)=np.sqrt(2*t(1-t)) component to an interpolant
+    Add the gamma(t)=np.sqrt(2*noise_coeff*t*(1-t)) component to an interpolant
+    Add the gamma(t)=np.sqrt(2*noise_coeff*t*(1-t)) component to an interpolant
     '''
-    SI.gamma = lambda t: np.sqrt(2*t(1-t))
-    SI.dgamma = lambda t: (1 - 2*t)/np.sqrt(2*t(1-t))
+    SI.noise_coeff = noise_coeff
+    SI.gamma = lambda t: np.sqrt(2*SI.noise_coeff*t*(1-t))
+    SI.dgamma = lambda t: (SI.noise_coeff*(1 - 2*t))/np.sqrt(SI.noise_coeff*2*t*(1-t))
     return SI
 
 def make_sinsq_noisy(SI):
