@@ -4,6 +4,8 @@ import torch
 import torch.nn.functional as F
 from torchvision import datasets, transforms
 from torch.utils.data import Dataset
+from scipy.optimize import linear_sum_assignment
+
 
 class CombinedDataset(Dataset):
     '''
@@ -226,3 +228,79 @@ def get_mnist_index(i, test=True):
 
     else:
         return train_idx[i]
+
+def kl_normal(qm, qv, pm, pv):
+    """
+    Computes the elem-wise KL divergence between two normal distributions KL(q || p) and
+    sum over the last dimension
+
+    Args:
+        qm: tensor: (batch, dim): q mean
+        qv: tensor: (batch, dim): q variance
+        pm: tensor: (batch, dim): p mean
+        pv: tensor: (batch, dim): p variance
+
+    Return:
+        kl: tensor: (batch,): kl between each sample
+    """
+    element_wise = 0.5 * (torch.log(pv) - torch.log(qv) + qv / pv + (qm - pm).pow(2) / pv - 1)
+    kl = element_wise.sum(-1)
+    return kl
+
+
+def compute_loss_LC(logits, z_mu, z_sigma, y):
+    '''
+    Compute the loss for the latent classifier.
+    '''
+    # likelihood term 
+    log_likelihood = F.cross_entropy(logits, y, reduction='none')
+    # kl term
+    kl = kl_normal(z_mu, z_sigma, torch.zeros_like(z_mu), torch.ones_like(z_sigma))
+    # sum over batch
+    loss = (log_likelihood + kl).mean()
+    return loss
+
+    
+def gaussian_parameters(h, dim=-1):
+    """
+    Converts generic real-valued representations into mean and variance
+    parameters of a Gaussian distribution
+
+    Args:
+        h: tensor: (batch, ..., dim, ...): Arbitrary tensor
+        dim: int: (): Dimension along which to split the tensor for mean and
+            variance
+
+    Returns:
+        m: tensor: (batch, ..., dim / 2, ...): Mean
+        v: tensor: (batch, ..., dim / 2, ...): Variance
+    """
+    m, h = torch.split(h, h.size(dim) // 2, dim=dim)
+    v = F.softplus(h) + 1e-8
+    return m, v
+
+def gaussian_wd(m1, s1, m2, s2):
+    """
+    Computes the Wasserstein distance between two Gaussians
+    """
+    return (m1 - m2).norm(2, dim=1) + (s1.sqrt() - s2.sqrt()).pow(2).sum(dim=1)
+
+def batch_gaussian_wd(m1, s1, m2, s2):
+    """
+    Computes the Wasserstein distance between two batches of Gaussians
+    """
+    mean_sq_norm = (m1.unsqueeze(1) - m2.unsqueeze(0)).norm(2, dim=2)
+    stddev_froeb_norm = (s1.unsqueeze(1) - s2.unsqueeze(0)).pow(2).sum(dim=2)
+    return mean_sq_norm + stddev_froeb_norm
+
+def optimal_WD_matching(x0, x1, encoder, return_indices=False):
+    h0 = encoder(x0)
+    h1 = encoder(x1)
+    z_mu0, z_sigma0 = gaussian_parameters(h0)
+    z_mu1, z_sigma1 = gaussian_parameters(h1)
+    wds = batch_gaussian_wd(z_mu0, z_sigma0, z_mu1, z_sigma1)
+    indices = linear_sum_assignment(wds.cpu().detach().numpy())[1]
+    if return_indices:
+        return x1[indices], indices
+    else:
+        return x1[indices]

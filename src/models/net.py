@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import math
+import src.util.util as ut
 
 # Neural network models. For complex images, use Unet.
 
@@ -72,5 +73,52 @@ class SmallNet(nn.Module):
         x = self.act(x)
         return x
 
+class LatentClassifier(nn.Module):
+    '''
+    A classifier for image data building a low-dimensional latent representation.
+    '''
+    def __init__(self, z_dim, ):
+        super().__init__()
+        self.z_dim = z_dim
+        self.encoder = nn.Sequential(
+                        nn.Conv2d(1, 28, kernel_size=3, padding=1),
+                        nn.ReLU(),
+                        nn.BatchNorm2d(28),
+                        nn.Conv2d(28, 28, kernel_size=3, padding=1),
+                        nn.ReLU(),
+                        nn.MaxPool2d(kernel_size=2),
+
+                        nn.Conv2d(28, 56, kernel_size=3, padding=1),
+                        nn.ReLU(),
+                        nn.BatchNorm2d(56),
+                        nn.Conv2d(56, 56, kernel_size=3, padding=1),
+                        nn.ReLU(),
+                        nn.MaxPool2d(kernel_size=2),
+
+                        nn.Conv2d(56, 112, kernel_size=3, padding=1),
+                        nn.ReLU(),
+                        nn.BatchNorm2d(112),
+                        nn.Conv2d(112, 112, kernel_size=3, padding=1),
+                        nn.ReLU(),
+                        nn.MaxPool2d(kernel_size=2),
+
+                        nn.Flatten(),
+                        nn.Linear(112 * 3 * 3, z_dim*2),
+                        nn.ReLU(),
+                    )
+
+        self.z_to_logits = nn.Sequential(
+                        nn.Linear(z_dim, 32),
+                        nn.ReLU(),
+                        nn.Linear(32, 10),
+                    )
+        
+    def forward(self, x):
+        h = self.encoder(x)
+        z_mu, z_sigma = ut.gaussian_parameters(h)
+        z = z_mu + z_sigma * torch.randn_like(z_sigma)
+
+        logits = self.z_to_logits(z)
+        return logits, z_mu, z_sigma
 
 

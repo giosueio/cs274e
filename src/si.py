@@ -186,12 +186,12 @@ class SI:
 
             ##### BOOKKEEPING
             if ep % save_int == 0:
-                torch.save(model.state_dict(), save_path / f'epoch_{ep}.pt')
+                torch.save(model.state_dict(), f'{save_path}/epoch_{ep}.pt')
 
             if evaluate:
-                plot_loss_curve(tr_losses, save_path / 'loss.pdf', te_loss=te_losses, te_epochs=eval_eps)
+                plot_loss_curve(tr_losses, f'{save_path}/loss.pdf', te_loss=te_losses, te_epochs=eval_eps)
             else:
-                plot_loss_curve(tr_losses, save_path / 'loss.pdf')
+                plot_loss_curve(tr_losses, f'{save_path}/loss.pdf')
 
     def sample_f(self, n_samples):
         '''
