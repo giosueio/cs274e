@@ -79,13 +79,13 @@ def get_unlabeled_mnist_data():
 
     preprocess = transforms.ToTensor()
     train_loader = torch.utils.data.DataLoader(
-        MNISTImagesOnly('data', train=True, download=True, transform=preprocess),
+        MNISTImagesOnly('../data', train=True, download=True, transform=preprocess),
         batch_size=100,
         shuffle=True
     )
 
     test_loader = torch.utils.data.DataLoader(
-        MNISTImagesOnly('data', train=False, download=True, transform=preprocess),
+        MNISTImagesOnly('../data', train=False, download=True, transform=preprocess),
         batch_size=100,
         shuffle=True
     )
@@ -94,7 +94,7 @@ def get_unlabeled_mnist_data():
 def get_svhn_data():
     preprocess = transforms.ToTensor()
     train_loader = torch.utils.data.DataLoader(
-        datasets.SVHN('data', split='extra', download=True, transform=preprocess),
+        datasets.SVHN('../data', split='extra', download=True, transform=preprocess),
         batch_size=100,
         shuffle=True)
 
@@ -109,7 +109,7 @@ def get_transformed_svhn_data():
             ])
 
     train_loader = torch.utils.data.DataLoader(
-        datasets.SVHN('data', split='extra', download=True, transform=preprocess),
+        datasets.SVHN('../data', split='extra', download=True, transform=preprocess),
         batch_size=100,
         shuffle=True)
 
@@ -123,8 +123,8 @@ def get_mnist_and_svhn_data(batch_size=100):
                 transforms.Normalize([0.], [1.])
             ])
         
-    d1 = datasets.MNIST('data', train=True, download=True, transform=preprocess)
-    d2 = datasets.SVHN('data', split='extra', download=True, transform=preprocess)
+    d1 = datasets.MNIST('../data', train=True, download=True, transform=preprocess)
+    d2 = datasets.SVHN('../data', split='extra', download=True, transform=preprocess)
 
     d2_reduced = torch.utils.data.Subset(d2, np.random.choice(len(d2), len(d1), replace=False))
 
@@ -136,16 +136,25 @@ def get_mnist_and_svhn_data(batch_size=100):
     
     return train_loader
 
-def get_doubleloader_mnist_and_svhn_data(batch_size=100):
+def get_doubleloader_mnist_and_svhn_data(batch_size=100, augment_mnist=False):
+
     preprocess = transforms.Compose([
                 transforms.Resize((28, 28)),
                 transforms.Grayscale(num_output_channels=1),
                 transforms.ToTensor(),
                 transforms.Normalize([0.], [1.])
             ])
+    
+    if augment_mnist:
+        preprocess_mnist = transforms.Compose([
+                    preprocess,
+                    transforms.RandomInvert(p=0.5),
+        ])
+    else:
+        preprocess_mnist = preprocess    
         
-    d1 = datasets.MNIST('data', train=True, download=True, transform=preprocess)
-    d2 = datasets.SVHN('data', split='extra', download=True, transform=preprocess)
+    d1 = datasets.MNIST('../data', train=True, download=True, transform=preprocess_mnist)
+    d2 = datasets.SVHN('../data', split='extra', download=True, transform=preprocess)
 
     d2_reduced = torch.utils.data.Subset(d2, np.random.choice(len(d2), len(d1), replace=False))
 
@@ -160,17 +169,61 @@ def get_doubleloader_mnist_and_svhn_data(batch_size=100):
     
     return train_loader
 
+def get_test_data():
+    preprocess = transforms.Compose([
+                transforms.Resize((28, 28)),
+                transforms.Grayscale(num_output_channels=1),
+                transforms.ToTensor(),
+                transforms.Normalize([0.], [1.])
+            ])
 
+    d1 = datasets.SVHN('../data', split='test', download=True, transform=preprocess)
+    d2 = datasets.MNIST('../data', train=False, download=True, transform=preprocess)
 
+    dataset = torch.utils.data.ConcatDataset([d1, d2])
+    test_loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=100,
+        shuffle=True
+    )
+    return test_loader
+
+def get_svhn_test():
+    preprocess = transforms.Compose([
+                transforms.Resize((28, 28)),
+                transforms.Grayscale(num_output_channels=1),
+                transforms.ToTensor(),
+                transforms.Normalize([0.], [1.])
+            ])
+
+    test_loader = torch.utils.data.DataLoader(
+        datasets.SVHN('../data', split='test', download=True, transform=preprocess),
+        batch_size=100,
+        shuffle=True
+    )
+    return test_loader
+
+def get_mnist_test():
+    preprocess = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize([0.], [1.])
+            ])
+
+    test_loader = torch.utils.data.DataLoader(
+        datasets.MNIST('../data', train=False, download=True, transform=preprocess),
+        batch_size=100,
+        shuffle=True
+    )
+    return test_loader
 
 def get_mnist_data(device, use_test_subset=True):
     preprocess = transforms.ToTensor()
     train_loader = torch.utils.data.DataLoader(
-        datasets.MNIST('data', train=True, download=True, transform=preprocess),
+        datasets.MNIST('../data', train=True, download=True, transform=preprocess),
         batch_size=100,
         shuffle=True)
     test_loader = torch.utils.data.DataLoader(
-        datasets.MNIST('data', train=False, download=True, transform=preprocess),
+        datasets.MNIST('../data', train=False, download=True, transform=preprocess),
         batch_size=100,
         shuffle=True)
 
@@ -248,16 +301,13 @@ def kl_normal(qm, qv, pm, pv):
     return kl
 
 
-def compute_loss_LC(logits, z_mu, z_sigma, y):
+def compute_loss_LC(logits, z_mu, z_sigma, y, beta=1.0):
     '''
     Compute the loss for the latent classifier.
     '''
-    # likelihood term 
     log_likelihood = F.cross_entropy(logits, y, reduction='none')
-    # kl term
     kl = kl_normal(z_mu, z_sigma, torch.zeros_like(z_mu), torch.ones_like(z_sigma))
-    # sum over batch
-    loss = (log_likelihood + kl).mean()
+    loss = (log_likelihood + beta*kl).mean()
     return loss
 
     
@@ -293,14 +343,18 @@ def batch_gaussian_wd(m1, s1, m2, s2):
     stddev_froeb_norm = (s1.unsqueeze(1) - s2.unsqueeze(0)).pow(2).sum(dim=2)
     return mean_sq_norm + stddev_froeb_norm
 
-def optimal_WD_matching(x0, x1, encoder, return_indices=False):
+def optimal_WD_matching(x0, x1, encoder, return_values=False):
     h0 = encoder(x0)
     h1 = encoder(x1)
     z_mu0, z_sigma0 = gaussian_parameters(h0)
     z_mu1, z_sigma1 = gaussian_parameters(h1)
     wds = batch_gaussian_wd(z_mu0, z_sigma0, z_mu1, z_sigma1)
     indices = linear_sum_assignment(wds.cpu().detach().numpy())[1]
-    if return_indices:
-        return x1[indices], indices
+    x1_opti = x1[indices]
+    if return_values:
+        values = []
+        for i in range(len(indices)):
+            values.append(wds[i, indices[i]].item())
+        return x1_opti, values
     else:
-        return x1[indices]
+        return x1_opti

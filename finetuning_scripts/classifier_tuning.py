@@ -13,8 +13,8 @@ from src.si import *
 from src.util import util as ut
 
 mixed_dataloader = ut.get_mnist_and_svhn_data(batch_size=64)
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(device)
 test_loader = ut.get_test_data()
 
 betas = [0.01, 0.05, 0.1, 0.5, 1.0]
@@ -26,8 +26,7 @@ best_loss = 10e5
 for b in betas:
     for lr in lrs:
         classifier = LatentClassifier(z_dim=10).to(device)
-
-        optimizer = optim.Adam(classifier.parameters(), lr=1e-4)
+        optimizer = optim.Adam(classifier.parameters(), lr=lr)
 
         classifier.train()
         for epoch in tqdm(range(100)):
@@ -40,7 +39,7 @@ for b in betas:
 
                 logits, z_mu, z_sigma = classifier(x)
                 
-                l = ut.compute_loss_LC(logits, z_mu, z_sigma, y, beta=.05)
+                l = ut.compute_loss_LC(logits, z_mu, z_sigma, y, beta=b)
                 l.backward()
                 optimizer.step()
         
