@@ -64,11 +64,21 @@ class SI:
         # TODO: find best fix when gamma(t) = 0, see section 6.1 of Albergo et al. 2023
         return -z/(self.gamma(t) + 1e-8)
     
-    def compute_loss(self, loss_type, model_out, t, x_0, x_1, z):
+    def straightness(self, b, x_0, x_1):
+        '''
+        Straightness of the interpolant, i.e. ||b(t, x_t)||_2^2
+        '''
+        S = b.norm()**2 + (x_1 - x_0).norm()**2
+        return S
+
+    def compute_loss(self, loss_type, model_out, t, x_0, x_1, z, lmbd=0.):
         if loss_type == 'score':
             target = self.s(t, z)
         elif loss_type == 'velocity':
             target = self.b(t, x_0, x_1, z)
+            if lmbd>0:
+                S = self.straightness(model_out, x_0, x_1)
+                return ((model_out - target)**2).mean() + lmbd*S
         elif loss_type == 'cvf':
             target = self.v(t, x_0, x_1)
         elif loss_type == 'noise':
@@ -76,9 +86,11 @@ class SI:
         return ((model_out - target)**2).mean()
 
     def train(self, train_loader, optimizer, epochs, loss_type='cvf',
-                scheduler=None, test_loader=None, eval_int=0, 
-                save_int=0, save_path=None):
-
+                scheduler=None, test_loader=None, eval_int=0, mcls=False,
+                encoder=None, save_int=0, save_path=None, lmbd=0.):
+        
+        if mcls:
+            assert encoder is not None, 'Encoder must be provided for MCLS training'
         tr_losses = []
         te_losses = []
         eval_eps = []
@@ -86,24 +98,25 @@ class SI:
 
         self.loss_type = loss_type
         self.one_sided = False
-        self.one_sided = False
 
         model = self.model
         device = self.device
         dtype = self.dtype
 
         first = True
-        for ep in range(1, epochs+1):
+        for ep in tqdm(range(1, epochs+1)):
             ##### TRAINING LOOP
             t0 = time.time()
             model.train()
             tr_loss = 0.0
 
-            for batch in tqdm(train_loader):
+            for batch in train_loader:
                 if first or not self.one_sided:
                     try:
                         x_0, x_1 = batch
                         x_0, x_1 = x_0.to(device), x_1.to(device)
+                        if mcls:
+                            x_1 = optimal_WD_matching(x_0, x_1, encoder)
                     except ValueError:
                         # When train_loader contains only one dataset, resort to one-sided interpolants (i.e. rho_1 is Gaussian)
                         x_0 = batch.to(device)
@@ -129,8 +142,7 @@ class SI:
 
                 # Evaluate loss and do gradient step
                 optimizer.zero_grad()
-                loss = self.compute_loss(loss_type, model_out, t, x_0, x_1, z)
-                loss = self.compute_loss(loss_type, model_out, t, x_0, x_1, z)
+                loss = self.compute_loss(loss_type, model_out, t, x_0, x_1, z, lmbd)
                 loss.backward()
                 optimizer.step()
 
@@ -174,7 +186,6 @@ class SI:
 
                             # Evaluate loss
                             loss = self.compute_loss(loss_type, model_out, t, x_0, x_1, z)
-                            loss = self.compute_loss(loss_type, model_out, t, x_0, x_1, z)
                             te_loss += loss.item()
                             
                         te_loss /= len(test_loader)
@@ -192,138 +203,6 @@ class SI:
                 plot_loss_curve(tr_losses, f'{save_path}/loss.pdf', te_loss=te_losses, te_epochs=eval_eps)
             else:
                 plot_loss_curve(tr_losses, f'{save_path}/loss.pdf')
-
-    def ot_train(self, train_loader, encoder, optimizer, epochs, loss_type='cvf',
-                scheduler=None, test_loader=None, eval_int=0, 
-                save_int=0, save_path=None):
-
-        tr_losses = []
-        te_losses = []
-        eval_eps = []
-        evaluate = (eval_int > 0) and (test_loader is not None)
-
-        self.loss_type = loss_type
-        self.one_sided = False
-        self.one_sided = False
-
-        model = self.model
-        device = self.device
-        dtype = self.dtype
-
-        first = True
-        for ep in range(1, epochs+1):
-            ##### TRAINING LOOP
-            t0 = time.time()
-            model.train()
-            tr_loss = 0.0
-
-            for batch in tqdm(train_loader):
-                if first or not self.one_sided:
-                    try:
-                        x_0, x_1 = batch
-                        x_0, x_1 = x_0.to(device), x_1.to(device)
-
-                        x_1 = optimal_WD_matching(x_0, x_1, encoder)
-                    except ValueError:
-                        # When train_loader contains only one dataset, resort to one-sided interpolants (i.e. rho_1 is Gaussian)
-                        x_0 = batch.to(device)
-                        x_1 = torch.randn_like(x_0).to(device)
-                        self.one_sided = True
-                else:
-                    x_0 = batch.to(device)
-                    x_1 = torch.randn_like(x_0).to(device)
-                
-                batch_size = x_0.shape[0]
-
-                if first:
-                    self.n_channels = x_0.shape[1]
-                    self.train_dims = x_0.shape[2:]
-                    first = False
-
-                # t ~ Unif[0, 1)
-                t = torch.rand(batch_size, device=device)
-                # Simulate x_t
-                x_t, z = self.simulate(t, x_0, x_1)
-                # Get model output
-                model_out = model(t, x_t)
-
-                # Evaluate loss and do gradient step
-                optimizer.zero_grad()
-                loss = self.compute_loss(loss_type, model_out, t, x_0, x_1, z)
-                loss = self.compute_loss(loss_type, model_out, t, x_0, x_1, z)
-                loss.backward()
-                optimizer.step()
-
-                tr_loss += loss.item()
-
-            tr_loss /= len(train_loader)
-            tr_losses.append(tr_loss)
-            if scheduler: scheduler.step()
-
-
-            t1 = time.time()
-            epoch_time = t1 - t0
-            print(f'tr @ epoch {ep}/{epochs} | Loss {tr_loss:.6f} | {epoch_time:.2f} (s)')
-
-            ##### EVAL LOOP
-            if eval_int > 0 and (ep % eval_int == 0):
-                t0 = time.time()
-                eval_eps.append(ep)
-
-                with torch.no_grad():
-                    model.eval()
-
-                    if evaluate:
-                        te_loss = 0.0
-                        for batch in test_loader:
-                            if not self.one_sided:
-                                x_0, x_1 = batch
-                                x_0, x_1 = x_0.to(device), x_1.to(device)
-                            else:
-                                x_0 = batch.to(device)
-                                x_1 = torch.randn_like(x_0).to(device)
-
-                            batch_size = x_0.shape[0]
-
-                            # t ~ Unif[0, 1)
-                            t = torch.rand(batch_size, device=device)
-                            # Simulate x_t
-                            x_t = self.simulate(t, x_0, x_1)
-                            # Get model output
-                            model_out = model(t, x_t)
-
-                            # Evaluate loss
-                            loss = self.compute_loss(loss_type, model_out, t, x_0, x_1, z)
-                            loss = self.compute_loss(loss_type, model_out, t, x_0, x_1, z)
-                            te_loss += loss.item()
-                            
-                        te_loss /= len(test_loader)
-                        te_losses.append(te_loss)
-
-                        t1 = time.time()
-                        epoch_time = t1 - t0
-                        print(f'te @ epoch {ep}/{epochs} | Loss {te_loss:.6f} | {epoch_time:.2f} (s)')
-
-            ##### BOOKKEEPING
-            if ep % save_int == 0:
-                torch.save(model.state_dict(), f'{save_path}/epoch_{ep}.pt')
-
-            if evaluate:
-                plot_loss_curve(tr_losses, f'{save_path}/loss.pdf', te_loss=te_losses, te_epochs=eval_eps)
-            else:
-                plot_loss_curve(tr_losses, f'{save_path}/loss.pdf')
-
-    def sample_f(self, n_samples):
-        '''
-        Sample from the stochastic interpolant, starting from x_0.
-        '''
-        AssertionError('Not implemented')
-
-    def sample_r(self, n_samples):
-        '''
-        Sample from the stochastic interpolant, starting from x_1.
-        '''
-        AssertionError('Not implemented')
 
     def v_to_b_model(self, model):
         '''
@@ -343,7 +222,7 @@ class SI:
         '''
         AssertionError('Not implemented')
 
-    def get_b_model(self, direction):
+    def get_b_model(self):
         '''
         Return the model of the velocity field b(t, x_t), depending on the direction of the ODE and on the loss type.
         '''
@@ -355,16 +234,13 @@ class SI:
             model = self.s_to_b_model(self.model)
         elif self.loss_type == 'noise':
             model = self.eta_to_b_model(self.model)
-            model = self.eta_to_b_model(self.model)
 
-        if direction == 'f':
-            return model
-        elif direction == 'r':
-            return lambda x, t: -model(1-t, x) # TODO: not sure if this is correct. might be -model(t, x)
-        
+        return model
+       
         
     @torch.no_grad()
-    def sample(self, x_initial, direction='f', n_samples=1, n_eval=2, return_path=False, rtol=1e-5, atol=1e-5):
+    def sample(self, x_initial, direction='f', n_samples=None, n_eval=2, device=None,
+               return_path=False, rtol=1e-5, atol=1e-5, lower_tlim=0, upper_tlim=1):
         '''
         Sample from the stochastic interpolant using an ODE, starting from x_initial.
 
@@ -376,21 +252,24 @@ class SI:
         - return_path: if True, return the entire path of samples, otherwise just the final sample
         - rtol, atol: tolerances for odeint
         '''        
-
-        t = torch.linspace(0, 1, n_eval, device=self.device)
+        if device is None:
+            device = self.device
+        if n_samples is None:
+            n_samples = x_initial.shape[0]
+        if direction == 'f':
+            t = torch.linspace(lower_tlim, upper_tlim, n_eval, device=device)
+        elif direction == 'r':
+            t = torch.linspace(upper_tlim, lower_tlim, n_eval, device=device)
         inital_batch_size = x_initial.shape[0]
 
         if n_samples > inital_batch_size:
             # if x_initial has less samples than n_samples, repeat x_initial at random to get n_samples
             n_new_samples = n_samples - inital_batch_size
             x_initial = torch.cat([x_initial, x_initial[torch.randperm(inital_batch_size)[:n_new_samples]]], dim=0)
-            # if x_initial has less samples than n_samples, repeat x_initial at random to get n_samples
-            n_new_samples = n_samples - inital_batch_size
-            x_initial = torch.cat([x_initial, x_initial[torch.randperm(inital_batch_size)[:n_new_samples]]], dim=0)
 
-        b_model = self.get_b_model(self, direction)
+        x_initial = x_initial.to(device)
+        b_model = self.get_b_model().to(device)
         method = 'dopri5'
-        out = odeint(b_model, x_initial, t, method=method, rtol=rtol, atol=atol)
         out = odeint(b_model, x_initial, t, method=method, rtol=rtol, atol=atol)
 
         if return_path:
@@ -426,13 +305,14 @@ class SLI(SI):
     def dgamma(self, t):
         return torch.zeros_like(t)
     
-    def eta_to_b_model(self, model):
-        '''
-        Given a model of the noise term z, return a model of the velocity field b(t,x_t). Use only for one-sided interpolants.
-        See 6.2 of Albergo et al. 2023, "A denoiser is all you need for spatially-linear one-sided interpolants"
-        '''
-        b_model = lambda t, x: self.da(t)*model(t,x) + self.db(t)/self.b(t)*(x - self.a(t)* self.model(t,x))
-        return b_model
+    # def eta_to_b_model(self, model):
+    #     '''
+    #     Given a model of the noise term z, return a model of the velocity field b(t,x_t). Use only for one-sided interpolants.
+    #     See 6.2 of Albergo et al. 2023, "A denoiser is all you need for spatially-linear one-sided interpolants"
+    #     '''
+    #     b_model = torch.nn.Module()
+    #     b_model.forward = lambda t, x: self.da(t)*model(t,x) + self.db(t)/self.b(t)*(x - self.a(t)* self.model(t,x))
+    #     return b_model
 
 class LinearInterpolant(SLI):
     '''
@@ -471,7 +351,7 @@ class PolynomialInterpolant(SLI):
     '''
     Polynomial Interpolant of order p, i.e. x(t) = (1-t)^p*x_0 + t^p*x_1
     '''
-    def __init__(self, p, model, device='cpu', dtype=torch.double):
+    def __init__(self, model, p=2, device='cpu', dtype=torch.double):
         super().__init__(model, device, dtype)
         self.p = p
 
@@ -497,7 +377,7 @@ class DiffusionInterpolant(SLI):
     def dalpha(self, t):
         return -t/torch.sqrt(1-t**2)
     def dbeta(self, t):
-        return np.ones_like(t)
+        return torch.ones_like(t)
 
 class EncoderDecoderInterpolant(SLI):
     '''

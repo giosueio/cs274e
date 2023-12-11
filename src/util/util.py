@@ -1,10 +1,54 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import datasets, transforms
 from torch.utils.data import Dataset
 from scipy.optimize import linear_sum_assignment
+import tarfile
+import os
+from PIL import Image
+import pandas as pd
+
+
+
+class CustomDataset(Dataset):
+    def __init__(self, root_dir, transform=None):
+        self.root_dir = root_dir
+        self.transform = transform
+        self.image_paths = [f for f in os.listdir(root_dir) if f.endswith('.png')]
+        self.csv_paths = [f for f in os.listdir(root_dir) if f.endswith('.csv')]
+        self.labels = self.load_labels()
+
+    def load_labels(self):
+        labels = {}
+        for csv_path in self.csv_paths:
+            df = pd.read_csv(os.path.join(self.root_dir, csv_path))
+            filename = f'{csv_path[:-3]}png'
+            labels[filename] = []
+            for rnum, row in df.iterrows():
+                if rnum == 7:
+                    labels[filename].append(row[1]==14)
+                elif rnum == 12:
+                    labels[filename].append(row[1]==11)
+            labels[filename] = torch.tensor(labels[filename])
+        return labels
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        img_name = self.image_paths[idx]
+        img_path = os.path.join(self.root_dir, img_name)
+        image = Image.open(img_path).convert('RGB')
+
+        label = self.labels[img_name]  # Adjust this line based on your CSV structure
+
+        if self.transform:
+            image = self.transform(image)
+
+        return image, label
 
 
 class CombinedDataset(Dataset):
@@ -136,7 +180,13 @@ def get_mnist_and_svhn_data(batch_size=100):
     
     return train_loader
 
-def get_doubleloader_mnist_and_svhn_data(batch_size=100, augment_mnist=False):
+def get_doubleloader_mnist_and_svhn_data(batch_size=100, 
+                                         seed=0,
+                                         augment_mnist=False,
+                                         return_testloader=False,):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
 
     preprocess = transforms.Compose([
                 transforms.Resize((28, 28)),
@@ -156,7 +206,10 @@ def get_doubleloader_mnist_and_svhn_data(batch_size=100, augment_mnist=False):
     d1 = datasets.MNIST('../data', train=True, download=True, transform=preprocess_mnist)
     d2 = datasets.SVHN('../data', split='extra', download=True, transform=preprocess)
 
-    d2_reduced = torch.utils.data.Subset(d2, np.random.choice(len(d2), len(d1), replace=False))
+    train_indices = np.random.choice(len(d2), len(d1), replace=False)
+    d2_reduced = torch.utils.data.Subset(d2, train_indices)
+
+    
 
     d1_nolabels = [data[0] for data in d1]
     d2_nolabels = [data[0] for data in d2_reduced]
@@ -167,9 +220,26 @@ def get_doubleloader_mnist_and_svhn_data(batch_size=100, augment_mnist=False):
         batch_size=batch_size,
         shuffle=True)
     
-    return train_loader
+    if return_testloader:
+        d1_test = datasets.MNIST('../data', train=False, download=True, transform=preprocess_mnist)
+        test_indices = np.setdiff1d(np.arange(len(d2)), train_indices)
+        d2_test = torch.utils.data.Subset(d2, test_indices)
+        d1_nolabels_test = [data[0] for data in d1_test]
+        d2_nolabels_test = [data[0] for data in d2_test]
+        test_dataset = CombinedDataset(d1_nolabels_test, d2_nolabels_test)
+        test_loader = torch.utils.data.DataLoader(
+            test_dataset,
+            batch_size=batch_size,
+            shuffle=True)
+        return train_loader, test_loader
+    else:
+        return train_loader
 
-def get_test_data():
+def get_test_data(seed=0):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+
     preprocess = transforms.Compose([
                 transforms.Resize((28, 28)),
                 transforms.Grayscale(num_output_channels=1),
@@ -188,7 +258,11 @@ def get_test_data():
     )
     return test_loader
 
-def get_svhn_test():
+def get_svhn_test(seed=0):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+
     preprocess = transforms.Compose([
                 transforms.Resize((28, 28)),
                 transforms.Grayscale(num_output_channels=1),
@@ -203,7 +277,11 @@ def get_svhn_test():
     )
     return test_loader
 
-def get_mnist_test():
+def get_mnist_test(seed=0):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    
     preprocess = transforms.Compose([
                 transforms.ToTensor(),
                 transforms.Normalize([0.], [1.])
@@ -358,3 +436,189 @@ def optimal_WD_matching(x0, x1, encoder, return_values=False):
         return x1_opti, values
     else:
         return x1_opti
+
+
+def celeba_dataset():
+    preprocess = transforms.Compose([
+        transforms.CenterCrop(178),
+        transforms.Resize((64, 64)),
+        transforms.ToTensor(),
+        transforms.Grayscale(),
+        transforms.Normalize((0.,), (1.,))
+    ])
+
+    celeba = datasets.CelebA(root='../data', split='train', download=True, transform=preprocess)
+    # take first 10000 images
+
+    # celeba_loader = torch.utils.data.DataLoader(celeba, batch_size=64, shuffle=True)
+
+    # keep only label 15 and 24 from celeba
+    celeba_labels = celeba.attr[:, (15, 24)]
+    celeba.attr = celeba_labels
+    return celeba
+
+def cartoon_dataset(path_to_tgz = '../data/cartoonset10k.tgz', extraction_path = '../data'):
+    # Replace '/path/to/cartoonset_dataset.tgz' with the actual path to your dataset file
+    dataset_path = path_to_tgz
+    extraction_path = extraction_path
+
+    # Create the extraction directory if it doesn't exist
+    os.makedirs(extraction_path, exist_ok=True)
+
+    # Extract the .tgz file
+    with tarfile.open(dataset_path, 'r:gz') as tar:
+        tar.extractall(path=extraction_path)
+    # Define the data transformations if needed
+    transform = transforms.Compose([
+        transforms.Resize((64, 64)),  # Adjust size as needed
+        transforms.Grayscale(),
+        transforms.ToTensor(),
+    ])
+    dataset_path = f'{extraction_path}/cartoonset10k'
+
+    cartoon = CustomDataset(root_dir=dataset_path, transform=transform)
+    return cartoon
+
+def get_doubleloader_celeba_cartoon(batch_size=100, 
+                                    seed=0,
+                                    path_to_tgz = '../data/cartoonset10k.tgz', 
+                                    extraction_path = '../data',
+                                    return_datasets=False,
+                                    return_testloader=False):
+
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+
+    celeba = celeba_dataset()
+    cartoon = cartoon_dataset(path_to_tgz, extraction_path)
+    print('Datasets loaded')
+
+    cartoon_indices = np.random.choice(len(cartoon), 9000, replace=False)
+    cartoon_reduced = torch.utils.data.Subset(cartoon, cartoon_indices)
+
+    celeba_indices = np.random.choice(len(celeba), 9000, replace=False)
+    celeba_reduced = torch.utils.data.Subset(celeba, celeba_indices)
+
+    celeba_nolabels = [data[0] for data in celeba_reduced]
+    cartoon_nolabels = [data[0] for data in cartoon_reduced]
+
+    dataset = CombinedDataset(celeba_nolabels, cartoon_nolabels)
+    print('Combined')
+    doubleloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True)
+    if return_datasets:
+        return doubleloader, celeba_reduced, cartoon
+    elif return_testloader:
+        celeba_test_indices = np.setdiff1d(np.arange(len(celeba)), celeba_indices)[:1000]
+        celeba_test = torch.utils.data.Subset(celeba, celeba_test_indices)
+        cartoon_test_indices = np.setdiff1d(np.arange(len(cartoon)), cartoon_indices)[:1000]
+        cartoon_test = torch.utils.data.Subset(cartoon, cartoon_test_indices)
+        test_dataset = CombinedDataset([cartoon_test, celeba_test])
+        testloader = torch.utils.data.DataLoader(
+            test_dataset,
+            batch_size=batch_size,
+            shuffle=True)
+        return doubleloader, testloader
+    else:
+        return doubleloader
+
+def get_mixedloader_celeba_cartoon(batch_size=100, 
+                                   seed=0,
+                                   path_to_tgz = '../data/cartoonset10k.tgz', 
+                                   extraction_path = '../data',
+                                   return_datasets=False,
+                                   return_testloader=False):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+
+    celeba = celeba_dataset()
+    cartoon = cartoon_dataset(path_to_tgz, extraction_path)
+    print('Datasets loaded')
+
+    cartoon_indices = np.random.choice(len(cartoon), 9000, replace=False)
+    cartoon_reduced = torch.utils.data.Subset(cartoon, cartoon_indices)
+
+    celeba_indices = np.random.choice(len(celeba), 9000, replace=False)
+    celeba_reduced = torch.utils.data.Subset(celeba, celeba_indices)
+
+    dataset = torch.utils.data.ConcatDataset([cartoon_reduced, celeba_reduced])
+    print('Concatenated')
+    mixedloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True)
+    if return_datasets:
+        return mixedloader, cartoon_reduced, celeba_reduced
+    elif return_testloader:
+        celeba_test_indices = np.setdiff1d(np.arange(len(celeba)), celeba_indices)[:1000]
+        celeba_test = torch.utils.data.Subset(celeba, celeba_test_indices)
+        cartoon_test_indices = np.setdiff1d(np.arange(len(cartoon)), cartoon_indices)[:1000]
+        cartoon_test = torch.utils.data.Subset(cartoon, cartoon_test_indices)
+        test_dataset = torch.utils.data.ConcatDataset([cartoon_test, celeba_test])
+        testloader = torch.utils.data.DataLoader(
+            test_dataset,
+            batch_size=batch_size,
+            shuffle=True)
+        return mixedloader, testloader
+    else:
+        return mixedloader
+
+def get_testloader_celeba_cartoon(batch_size=100,
+                                    seed=0,
+                                    path_to_tgz = '../data/cartoonset10k.tgz', 
+                                    extraction_path = '../data'):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+
+    celeba = celeba_dataset()
+    cartoon = cartoon_dataset(path_to_tgz, extraction_path)
+    print('Datasets loaded')
+
+    cartoon_indices = np.random.choice(len(cartoon), 9000, replace=False)
+    cartoon_reduced = torch.utils.data.Subset(cartoon, cartoon_indices)
+
+    celeba_indices = np.random.choice(len(celeba), 9000, replace=False)
+    celeba_reduced = torch.utils.data.Subset(celeba, celeba_indices)
+
+    celeba_test_indices = np.setdiff1d(np.arange(len(celeba)), celeba_indices)[:1000]
+    celeba_test = torch.utils.data.Subset(celeba, celeba_test_indices)
+    cartoon_test_indices = np.setdiff1d(np.arange(len(cartoon)), cartoon_indices)[:1000]
+    cartoon_test = torch.utils.data.Subset(cartoon, cartoon_test_indices)
+
+    celeba_nolabels = [data[0] for data in celeba_test]
+    cartoon_nolabels = [data[0] for data in cartoon_test]
+
+    test_dataset = CombinedDataset(celeba_nolabels, cartoon_nolabels)
+    testloader = torch.utils.data.DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=True)
+    return testloader
+
+
+def compute_loss_BLC(logits, z_mu, z_sigma, y, beta=1.0):
+    '''
+    Compute the loss for the latent classifier.
+    '''
+    log_likelihood = nn.BCEWithLogitsLoss()(logits, y)
+    kl = kl_normal(z_mu, z_sigma, torch.zeros_like(z_mu), torch.ones_like(z_sigma))
+    loss = (log_likelihood + beta*kl).mean()
+    return loss
+
+class model_counter(nn.Module):
+    '''
+    After initialization, keep count of the forward passes in the model
+    '''
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+        self.counter = 0
+
+    def forward(self, t, x):
+        self.counter += 1
+        return self.model(t, x)

@@ -4,6 +4,12 @@
 # dataset
 notebooks/data/
 data/
+models/
+figures/
+gen_samples/
+gen_samples_ot/
+real_samples/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -48,5 +48,4 @@ epochs = 500
 scheduler = optim.lr_scheduler.StepLR(optimizer, epochs//2, gamma=0.1)
 
 si.train(combined_dataloader, optimizer, epochs,loss_type='velocity', scheduler=scheduler, mcls=True, encoder=encoder,
-         eval_int=50, save_int=50, save_path=f'../finetuning_scripts/mnist_model_lin_ot
-         ')
+         eval_int=50, save_int=50, save_path=f'../models/mnist_model_lin_ot')

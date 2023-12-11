@@ -122,3 +122,51 @@ class LatentClassifier(nn.Module):
         return logits, z_mu, z_sigma
 
 
+class BigLatentClassifier(nn.Module):
+    '''
+    A bigger classifier for image data building a low-dimensional latent representation.
+    '''
+    def __init__(self, z_dim, ):
+        super().__init__()
+        self.z_dim = z_dim
+        self.encoder = nn.Sequential(
+                        nn.Conv2d(1, 64, kernel_size=3, padding=1),
+                        nn.ReLU(),
+                        nn.BatchNorm2d(64),
+                        nn.Conv2d(64, 64, kernel_size=3, padding=1),
+                        nn.ReLU(),
+                        nn.MaxPool2d(kernel_size=2),
+
+                        nn.Conv2d(64, 128, kernel_size=3, padding=1),
+                        nn.ReLU(),
+                        nn.BatchNorm2d(128),
+                        nn.Conv2d(128, 128, kernel_size=3, padding=1),
+                        nn.ReLU(),
+                        nn.MaxPool2d(kernel_size=2),
+
+                        nn.Conv2d(128, 256, kernel_size=3, padding=1),
+                        nn.ReLU(),
+                        nn.BatchNorm2d(256),
+                        nn.Conv2d(256, 256, kernel_size=3, padding=1),
+                        nn.ReLU(),
+                        nn.MaxPool2d(kernel_size=2),
+                        
+                        nn.Flatten(),
+                        nn.Linear(256 * 64, z_dim*2),
+                        nn.ReLU(),
+                    )
+
+        self.z_to_logits = nn.Sequential(
+                        nn.Linear(z_dim, 32),
+                        nn.ReLU(),
+                        nn.Linear(32, 2),
+                    )
+        
+    def forward(self, x):
+        h = self.encoder(x)
+        z_mu, z_sigma = ut.gaussian_parameters(h)
+        z = z_mu + z_sigma * torch.randn_like(z_sigma)
+
+        logits = self.z_to_logits(z)
+        return logits, z_mu, z_sigma
+

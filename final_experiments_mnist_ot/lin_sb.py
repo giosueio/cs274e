@@ -19,7 +19,7 @@ np.random.seed(0)
 torch.manual_seed(0)
 torch.cuda.manual_seed(0)
 
-combined_dataloader = ut.get_doubleloader_mnist_and_svhn_data(batch_size=64)
+combined_dataloader = ut.get_doubleloader_mnist_and_svhn_data(batch_size=128)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 

@@ -1,4 +1,5 @@
 numpy
+scipy
 torch
 torchvision
 torchdiffeq
@@ -6,3 +7,5 @@ tqdm
 denoising_diffusion_pytorch
 matplotlib
 einops
+tarfile
+pandas
